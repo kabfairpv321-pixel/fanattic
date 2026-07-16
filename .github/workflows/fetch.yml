@@ -1,1 +1,31 @@
+# FanAttic score fetcher â€” GitHub Actions edition.
+#
+# Setup (one time): repo Settings -> Secrets and variables -> Actions
+#   -> New repository secret, add:
+#      SUPABASE_URL           your project URL
+#      SUPABASE_SERVICE_KEY   the service_role key (Settings -> API)
+#      NTFY_TOPIC             optional, for phone pushes
+#
+# Runs every 5 minutes. Free-tier honest math: ~1,440 minutes between
+# now and the final â€” inside the free 2,000. AFTER THE FINAL: Actions
+# tab -> fetch-scores -> "..." -> Disable workflow, so it stops
+# spending minutes on an empty calendar until the autumn leagues.
 
+name: fetch-scores
+
+on:
+  workflow_dispatch:        # the manual "Run workflow" button
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes (can lag a few more)
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Poll scoreboards
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python3 sports/fetcher_espn.py

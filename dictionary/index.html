@@ -1,1 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Ledger — words, with receipts</title>
+<style>
+  :root{
+    --ink:#e8e4d8; --dim:#9a958a; --faint:#5c584f;
+    --paper:#0c0f14; --card:#12161d; --line:#262b35; --brass:#c9a45c;
+  }
+  *{box-sizing:border-box;margin:0}
+  body{background:var(--paper);color:var(--ink);
+       font:16px/1.55 Georgia,'Iowan Old Style',serif;
+       min-height:100vh;display:flex;flex-direction:column}
+  main{max-width:560px;width:100%;margin:0 auto;padding:20px 16px 48px;flex:1}
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+  header{border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:20px}
+  header h1{font-size:22px;font-weight:normal;letter-spacing:.02em}
+  header p{color:var(--dim);font-size:13px;margin-top:2px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:16px;margin-bottom:14px}
+  .eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+           color:var(--brass);margin-bottom:8px}
+  .word{font-size:26px}
+  .pron{color:var(--dim);font-size:14px;margin-left:6px}
+  .receipt{color:var(--faint);font-size:11.5px;margin-top:8px}
+  .defn{margin-top:8px;color:var(--ink)}
+  .example{color:var(--dim);font-style:italic;margin-top:6px;font-size:14.5px}
+  details{margin-top:10px}
+  summary{cursor:pointer;color:var(--dim);font-size:13px}
+  .sense{border-left:2px solid var(--line);padding-left:10px;margin-top:10px}
+  .sense .pos{color:var(--brass);font-size:12px;letter-spacing:.06em}
+  .row{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);
+         background:transparent;color:var(--ink);padding:6px 12px}
+  button:hover{border-color:var(--brass)}
+  button:disabled{color:var(--faint);cursor:default;border-color:var(--line)}
+  button:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+  .votebtn{font-size:13px}
+  form{display:flex;flex-direction:column;gap:8px}
+  input,textarea{font:inherit;background:var(--paper);color:var(--ink);
+                 border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  input:focus,textarea:focus{outline:1px solid var(--brass)}
+  textarea{min-height:64px;resize:vertical}
+  label{font-size:12px;color:var(--dim)}
+  #status{color:var(--dim);font-size:13px;min-height:18px;margin-bottom:12px}
+  .setup{border:1px dashed var(--brass);color:var(--dim);font-size:14px;
+         border-radius:10px;padding:14px;line-height:1.6}
+  footer{border-top:1px solid var(--line);text-align:center;padding:14px;
+         color:var(--faint);font-size:11px;letter-spacing:.14em;text-transform:uppercase}
+  @media (prefers-reduced-motion: no-preference){
+    .card{transition:border-color .2s}
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>The Ledger</h1>
+    <p>Words entered as coined. Tracked, and used back.</p>
+  </header>
 
+  <div id="status"></div>
+  <div id="app"></div>
+
+  <section class="card">
+    <p class="eyebrow">Coin a word</p>
+    <form id="coinForm">
+      <label>The word <input id="f_word" required maxlength="100"></label>
+      <label>What it means <textarea id="f_def" required></textarea></label>
+      <label>Used in a sentence <textarea id="f_ex"></textarea></label>
+      <label>Coined by <input id="f_by" required maxlength="120"></label>
+      <button type="button" id="coinBtn">Enter it into the record</button>
+    </form>
+  </section>
+</main>
+<footer>Ad slot · reserved · not yet leased</footer>
+
+<script>
+/* ── Config: paste from Supabase → Settings → API ─────────── */
+const SUPABASE_URL      = "https://xgcxqugcqwryduglpfgs.supabase.co";      // e.g. https://abcd1234.supabase.co
+const SUPABASE_ANON_KEY = "sb_publishable_mIBbQMwd1qmtPfqAIaxdaA_PYj-mtBO";
+/* The anon key is public by design; RLS is what guards the doors. */
+
+const CONFIGURED = SUPABASE_URL.startsWith("https://");
+const H = { apikey: SUPABASE_ANON_KEY,
+            Authorization: "Bearer " + SUPABASE_ANON_KEY,
+            "Content-Type": "application/json" };
+
+/* One browser, one voter identity — matches the (word_id, voter_id) key. */
+let voterId = localStorage.getItem("ledger_voter");
+if (!voterId) { voterId = crypto.randomUUID(); localStorage.setItem("ledger_voter", voterId); }
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const say = (m) => { document.getElementById("status").textContent = m; };
+const fmtDate = (d) => new Date(d).toLocaleDateString([], {day:"numeric", month:"short", year:"numeric"});
+
+async function api(path, opts = {}) {
+  const res = await fetch(SUPABASE_URL + "/rest/v1/" + path, { headers: H, ...opts });
+  if (res.status === 409) throw { conflict: true };
+  if (!res.ok) throw new Error("Request failed (" + res.status + ")");
+  return res.status === 201 ? null : res.json();
+}
+
+let entries = [], votes = {}, mine = new Set();
+
+async function load() {
+  if (!CONFIGURED) {
+    document.getElementById("app").innerHTML =
+      '<div class="setup">Not connected yet. Open this file, paste your Supabase URL and anon key into the config block at the top of the script, save, refresh. That is the whole installation.</div>';
+    return;
+  }
+  say("Fetching the record…");
+  try {
+    const [words, voteRows] = await Promise.all([
+      api("seamless_dictionary?select=id,invented_word,definition,example_usage,pronunciation,coined_by,created_at,word_senses(sense_no,part_of_speech,definition,example_usage)&order=created_at.asc"),
+      api("word_votes?select=word_id,voter_id"),
+    ]);
+    entries = words;
+    votes = {}; mine = new Set();
+    for (const v of voteRows) {
+      votes[v.word_id] = (votes[v.word_id] || 0) + 1;
+      if (v.voter_id === voterId) mine.add(v.word_id);
+    }
+    say("");
+    render();
+  } catch (e) { say("Could not reach the ledger. Check the config values and that both SQL files ran."); }
+}
+
+function entryCard(w, i, isWotd) {
+  const senses = (w.word_senses || []).sort((a, b) => a.sense_no - b.sense_no);
+  const senseHtml = senses.length ? `
+    <details><summary>${senses.length} senses on file</summary>
+      ${senses.map(s => `
+        <div class="sense">
+          <div class="pos">${s.sense_no}. ${esc(s.part_of_speech)}</div>
+          <div class="defn">${esc(s.definition)}</div>
+          ${s.example_usage ? `<div class="example">${esc(s.example_usage)}</div>` : ""}
+        </div>`).join("")}
+    </details>` : "";
+  const n = votes[w.id] || 0;
+  const voted = mine.has(w.id);
+  return `
+  <section class="card" style="${isWotd ? "border-color:var(--brass)" : ""}">
+    ${isWotd ? '<p class="eyebrow">Word of the day</p>' : ""}
+    <div class="row">
+      <span><span class="word">${esc(w.invented_word)}</span>${w.pronunciation ? `<span class="pron mono">${esc(w.pronunciation)}</span>` : ""}</span>
+      <button class="votebtn mono" data-vote="${w.id}" ${voted ? "disabled" : ""}>${voted ? "✓ " : "▲ "}${n}</button>
+    </div>
+    <div class="defn">${esc(w.definition)}</div>
+    ${w.example_usage ? `<div class="example">${esc(w.example_usage)}</div>` : ""}
+    ${senseHtml}
+    <div class="receipt mono">coined by ${esc(w.coined_by)} · ${fmtDate(w.created_at)} · entry №${i + 1}</div>
+  </section>`;
+}
+
+function render() {
+  const app = document.getElementById("app");
+  if (!entries.length) { app.innerHTML = '<div class="setup">The record is empty. Coin the first word below.</div>'; return; }
+  const wotd = Math.floor(Date.now() / 864e5) % entries.length;
+  app.innerHTML = entryCard(entries[wotd], wotd, true) +
+    entries.map((w, i) => i === wotd ? "" : entryCard(w, i, false)).join("");
+  app.querySelectorAll("[data-vote]").forEach(b => b.onclick = () => vote(+b.dataset.vote, b));
+}
+
+async function vote(wordId, btn) {
+  btn.disabled = true;
+  try {
+    await api("word_votes", { method: "POST", body: JSON.stringify({ word_id: wordId, voter_id: voterId }) });
+    votes[wordId] = (votes[wordId] || 0) + 1; mine.add(wordId);
+    btn.textContent = "✓ " + votes[wordId];
+  } catch (e) {
+    if (e.conflict) { btn.textContent = "✓ " + (votes[wordId] || 0); mine.add(wordId); }
+    else { btn.disabled = false; say("Vote didn't land. Try again."); }
+  }
+}
+
+document.getElementById("coinBtn").onclick = async () => {
+  const word = f_word.value.trim(), def = f_def.value.trim(),
+        ex = f_ex.value.trim(), by = f_by.value.trim();
+  if (!word || !def || !by) { say("A word, a meaning, and a name — the record requires all three."); return; }
+  try {
+    await api("seamless_dictionary", { method: "POST",
+      body: JSON.stringify({ invented_word: word, definition: def, example_usage: ex || null, coined_by: by }) });
+    f_word.value = f_def.value = f_ex.value = "";
+    say("Entered. Timestamped. Yours.");
+    load();
+  } catch (e) {
+    say(e.conflict ? "Already coined — the ledger protects first claims." : "The record refused it. Check the connection and try again.");
+  }
+};
+
+load();
+</script>
+</body>
+</html>
